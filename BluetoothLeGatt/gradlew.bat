@@ -4,7 +4,7 @@
 @rem  Gradle startup script for Windows
 @rem
 @rem ##########################################################################
-
+set java_home="c:\Program Files\Android\Android Studio\jre\"
 @rem Set local scope for the variables with windows NT shell
 if "%OS%"=="Windows_NT" setlocal
 

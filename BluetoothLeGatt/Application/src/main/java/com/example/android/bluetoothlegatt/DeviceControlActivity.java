@@ -38,6 +38,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import android.widget.Toast;
 
 /**
  * For a given BLE device, this Activity provides the user interface to connect, display data,
@@ -126,20 +127,20 @@ public class DeviceControlActivity extends Activity {
                         final BluetoothGattCharacteristic characteristic =
                                 mGattCharacteristics.get(groupPosition).get(childPosition);
                         final int charaProp = characteristic.getProperties();
-                        if ((charaProp | BluetoothGattCharacteristic.PROPERTY_READ) > 0) {
-                            // If there is an active notification on a characteristic, clear
-                            // it first so it doesn't update the data field on the user interface.
-                            if (mNotifyCharacteristic != null) {
-                                mBluetoothLeService.setCharacteristicNotification(
-                                        mNotifyCharacteristic, false);
-                                mNotifyCharacteristic = null;
-                            }
-                            mBluetoothLeService.readCharacteristic(characteristic);
+                        // If there is an active notification on a characteristic, clear
+                        // it first so it doesn't update the data field on the user interface.
+                        if (mNotifyCharacteristic != null) {
+                            mBluetoothLeService.setCharacteristicNotification(
+                                    mNotifyCharacteristic, false);
+                            mNotifyCharacteristic = null;
                         }
-                        if ((charaProp | BluetoothGattCharacteristic.PROPERTY_NOTIFY) > 0) {
+                        if ((charaProp & BluetoothGattCharacteristic.PROPERTY_NOTIFY) > 0) {
                             mNotifyCharacteristic = characteristic;
                             mBluetoothLeService.setCharacteristicNotification(
                                     characteristic, true);
+                        }
+                        if ((charaProp & BluetoothGattCharacteristic.PROPERTY_READ) > 0) {
+                            mBluetoothLeService.readCharacteristic(characteristic);
                         }
                         return true;
                     }
@@ -279,6 +280,14 @@ public class DeviceControlActivity extends Activity {
                         LIST_NAME, SampleGattAttributes.lookup(uuid, unknownCharaString));
                 currentCharaData.put(LIST_UUID, uuid);
                 gattCharacteristicGroupData.add(currentCharaData);
+
+                final int charaProp = gattCharacteristic.getProperties();
+                if ((charaProp & BluetoothGattCharacteristic.PROPERTY_NOTIFY) > 0 && "5c7d82a0-9803-11e3-8a6c-0002a5d5c51b".equals(uuid)) {
+                    Toast.makeText(this, "Found source", Toast.LENGTH_SHORT).show();
+                    mNotifyCharacteristic = gattCharacteristic;
+                    mBluetoothLeService.setCharacteristicNotification(
+                            gattCharacteristic, true);
+                }
             }
             mGattCharacteristics.add(charas);
             gattCharacteristicData.add(gattCharacteristicGroupData);

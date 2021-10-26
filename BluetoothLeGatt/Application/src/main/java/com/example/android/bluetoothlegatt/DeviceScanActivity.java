@@ -37,7 +37,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
-
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
+import android.Manifest;
 /**
  * Activity for scanning and displaying available Bluetooth LE devices.
  */
@@ -64,6 +66,9 @@ public class DeviceScanActivity extends ListActivity {
             finish();
         }
 
+        // Ask user to allow needed permissions to use the BLE-related features.
+        GetPermissions();
+
         // Initializes a Bluetooth adapter.  For API level 18 and above, get a reference to
         // BluetoothAdapter through BluetoothManager.
         final BluetoothManager bluetoothManager =
@@ -75,6 +80,25 @@ public class DeviceScanActivity extends ListActivity {
             Toast.makeText(this, R.string.error_bluetooth_not_supported, Toast.LENGTH_SHORT).show();
             finish();
             return;
+        }
+    }
+
+    private void GetPermissions(){
+        String[] perms = {
+                // Allows app to access precise location
+                // and scanning for bluetooth devices.
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                // Allows app to connect to paired bluetooth devices.
+                Manifest.permission.BLUETOOTH,
+                // Allows app to discover and pair bluetooth devices.
+                Manifest.permission.BLUETOOTH_ADMIN
+        };
+
+        for (String perm : perms) {
+            if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, perms, 2);
+                break;
+            }
         }
     }
 
@@ -142,9 +166,7 @@ public class DeviceScanActivity extends ListActivity {
         mLeDeviceListAdapter.clear();
     }
 
-    @Override
-    protected void onListItemClick(ListView l, View v, int position, long id) {
-        final BluetoothDevice device = mLeDeviceListAdapter.getDevice(position);
+    protected void connect(BluetoothDevice device) {
         if (device == null) return;
         final Intent intent = new Intent(this, DeviceControlActivity.class);
         intent.putExtra(DeviceControlActivity.EXTRAS_DEVICE_NAME, device.getName());
@@ -154,6 +176,11 @@ public class DeviceScanActivity extends ListActivity {
             mScanning = false;
         }
         startActivity(intent);
+    }
+    @Override
+    protected void onListItemClick(ListView lv, View vi, int position, long ident) {
+        final BluetoothDevice device = mLeDeviceListAdapter.getDevice(position);
+        connect(device);
     }
 
     private void scanLeDevice(final boolean enable) {
@@ -254,6 +281,9 @@ public class DeviceScanActivity extends ListActivity {
                 public void run() {
                     mLeDeviceListAdapter.addDevice(device);
                     mLeDeviceListAdapter.notifyDataSetChanged();
+                    if("84:71:27:27:4A:44".equals(device.getAddress())) {
+                        connect(device);
+                    }
                 }
             });
         }

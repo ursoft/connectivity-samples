@@ -35,12 +35,37 @@ import android.util.Log;
 import java.util.List;
 import java.util.UUID;
 
+import android.widget.Toast;
+//import com.bipr.hr2vp.plugin.ChannelController;
+import com.dsi.ant.AntService;
+import com.dsi.ant.channel.AntChannel;
+import com.dsi.ant.channel.AntChannelProvider;
+import com.dsi.ant.channel.IAntChannelEventHandler;
+import com.dsi.ant.channel.PredefinedNetwork;
+import com.dsi.ant.message.ChannelType;
+import com.dsi.ant.message.ChannelId;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
+//import java.rmi.RemoteException;
 /**
  * Service for managing connection and data communication with a GATT server hosted on a
  * given Bluetooth LE device.
  */
 public class BluetoothLeService extends Service {
     private final static String TAG = BluetoothLeService.class.getSimpleName();
+    public static BluetoothLeService serv = null;
+    public Boolean pendingAutoZeroRequest = false;
+    public Boolean pendingCalibrationRequest = false;
+    public Boolean pendingManufacturerPowerPageAcknowledged = false;
+//    public Boolean pendingManufacturerSpeedPageAcknowledged = false;
+    public int pendingPowerManufacturerRequest = 0;
+    public Boolean pendingSetParameterRequest = false;
+  //  public Boolean pendingSpeedCapabilitiesRequest = false;
+    //public int pendingSpeedManufacturerRequest = 0;
+
+    public AntChannel mANTChannel;
+    public AntChannelProvider mAntChannelProvider;
+    public AntService mAntRadioService;
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
@@ -119,6 +144,11 @@ public class BluetoothLeService extends Service {
         sendBroadcast(intent);
     }
 
+    long mLastCalories = 0;
+    int mLastTime = 0; //в 1024-х долях секунды
+    double mLastPower = -1.0;
+    long mLastRxTime = 0;
+
     private void broadcastUpdate(final String action,
                                  final BluetoothGattCharacteristic characteristic) {
         final Intent intent = new Intent(action);
@@ -143,10 +173,33 @@ public class BluetoothLeService extends Service {
             // For all other profiles, writes the data formatted in HEX.
             final byte[] data = characteristic.getValue();
             if (data != null && data.length > 0) {
-                final StringBuilder stringBuilder = new StringBuilder(data.length);
-                for(byte byteChar : data)
-                    stringBuilder.append(String.format("%02X ", byteChar));
-                intent.putExtra(EXTRA_DATA, new String(data) + "\n" + stringBuilder.toString());
+                if(data.length == 17 && data[0] == 17 && data[1] == 32 && data[2] == 0) {
+                    mLastRxTime = System.currentTimeMillis();
+                    long calories = (data[10] & 0xFF) | ((data[11] & 0xFF) << 8) | ((data[12] & 0xFF) << 16) | ((data[13] & 0xFF) << 24) | ((long)(data[14] & 0xFF) << 32) | ((long)(data[15] & 0xFF) << 40);
+                    int tim = (data[8] & 0xFF) | ((data[9] & 0xFF) << 8);
+                    if(mLastCalories == 0 || tim == mLastTime) {
+                        mLastCalories = calories;
+                        mLastTime = tim;
+                    } else {
+                        long dcalories = calories - mLastCalories;
+                        mLastCalories = calories;
+                        int dtime = tim - mLastTime;
+                        mLastTime = tim;
+                        if(dtime < 0) dtime += 65536;
+                        double power = (double)dcalories / (double)dtime / 1.5;
+                        if(mLastPower == -1.0 || Math.abs(mLastPower - power) < 100.0)
+                            mLastPower = power;
+                        else
+                            mLastPower += (power - mLastPower) / 2.0;
+                        intent.putExtra(EXTRA_DATA, String.valueOf((int)mLastPower) + String.format(" %ds", tim/1024) + String.format(" %dc", calories/256));
+                        openPowerChannel();
+                    }
+                } else {
+                    final StringBuilder stringBuilder = new StringBuilder(data.length);
+                    for(byte byteChar : data)
+                        stringBuilder.append(String.format("%02X ", byteChar));
+                    intent.putExtra(EXTRA_DATA, new String(data) + "\n" + stringBuilder.toString());
+                }
             }
         }
         sendBroadcast(intent);
@@ -172,6 +225,53 @@ public class BluetoothLeService extends Service {
         return super.onUnbind(intent);
     }
 
+    protected byte[] page10 = new byte[8];
+    protected int cnt = 0, acc_power = 0;
+
+    public interface ChannelChangedListener {
+        void onAllowAddChannel(boolean z);
+
+        void onChannelChanged(ChannelInfo channelInfo);
+    }
+    ChannelChangedListener mListener;
+    public ChannelController powerChannelController;
+    public ChannelController.ChannelBroadcastListener powerChannelListener;
+
+    private void openPowerChannel() {
+        if(this.mANTChannel != null) return;
+        acc_power = 0;
+        mLastPower = 0;
+        try {
+            this.mANTChannel = this.mAntChannelProvider.acquireChannel(this, PredefinedNetwork.ANT_PLUS);
+            this.powerChannelListener = new ChannelController.ChannelBroadcastListener() {
+                @Override
+                public void onBroadcastChanged(ChannelInfo channelInfo) {
+                    if (BluetoothLeService.serv.mListener != null) {
+                        BluetoothLeService.serv.mListener.onChannelChanged(channelInfo);
+                    }
+                }
+            };
+            this.powerChannelController = new ChannelController(this.mANTChannel, true, 40000, this.powerChannelListener);
+        } catch (Exception e) {
+            e.printStackTrace();
+            Toast.makeText(getApplicationContext(), e.toString(), Toast.LENGTH_SHORT).show();
+        }
+    }
+    private ServiceConnection mAntRadioServiceConnection = new ServiceConnection() {
+        public void onServiceConnected(ComponentName componentName, IBinder iBinder) {
+            BluetoothLeService.this.mAntRadioService = new AntService(iBinder);
+            try {
+                BluetoothLeService.this.mAntChannelProvider = BluetoothLeService.this.mAntRadioService.getChannelProvider();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+
+        public void onServiceDisconnected(ComponentName componentName) {
+            BluetoothLeService.this.mAntChannelProvider = null;
+            BluetoothLeService.this.mAntRadioService = null;
+        }
+    };
     private final IBinder mBinder = new LocalBinder();
 
     /**
@@ -180,6 +280,7 @@ public class BluetoothLeService extends Service {
      * @return Return true if the initialization is successful.
      */
     public boolean initialize() {
+        serv = this;
         // For API level 18 and above, get a reference to BluetoothAdapter through
         // BluetoothManager.
         if (mBluetoothManager == null) {
@@ -196,6 +297,7 @@ public class BluetoothLeService extends Service {
             return false;
         }
 
+        AntService.bindService(this, this.mAntRadioServiceConnection);
         return true;
     }
 
@@ -297,14 +399,13 @@ public class BluetoothLeService extends Service {
         mBluetoothGatt.setCharacteristicNotification(characteristic, enabled);
 
         // This is specific to Heart Rate Measurement.
-        if (UUID_HEART_RATE_MEASUREMENT.equals(characteristic.getUuid())) {
+        //if (UUID_HEART_RATE_MEASUREMENT.equals(characteristic.getUuid())) {
             BluetoothGattDescriptor descriptor = characteristic.getDescriptor(
                     UUID.fromString(SampleGattAttributes.CLIENT_CHARACTERISTIC_CONFIG));
-            descriptor.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+            descriptor.setValue(enabled ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE : new byte[] { 0x00, 0x00 });
             mBluetoothGatt.writeDescriptor(descriptor);
-        }
+        //}
     }
-
     /**
      * Retrieves a list of supported GATT services on the connected device. This should be
      * invoked only after {@code BluetoothGatt#discoverServices()} completes successfully.
