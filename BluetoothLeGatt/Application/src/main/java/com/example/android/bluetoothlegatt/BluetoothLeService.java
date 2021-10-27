@@ -149,6 +149,45 @@ public class BluetoothLeService extends Service {
     double mLastPower = -1.0;
     long mLastRxTime = 0;
 
+    //cadence calculator
+    long[] mCadTimes = new long[600]; //currentTimeMillis
+    int[]  mCadRotations = new int[600];
+    int mCadPointer = -1;
+    private void updateCadence(int cadRotations) {
+        mCadPointer++;
+        int cadPointer = mCadPointer % 600;
+        mCadTimes[cadPointer] = mLastRxTime;
+        if(mCadTimes[cadPointer] == 0) mCadTimes[cadPointer] = 1;
+        mCadRotations[cadPointer] = cadRotations;
+    }
+    long mLastCalcCadTime = 0;
+    int mLastCalcCad = 0;
+    public int currentCadence() {
+        long t = System.currentTimeMillis();
+        if(t - mLastCalcCadTime < 1000 && mLastCalcCad != 0)
+            return mLastCalcCad;
+        if(t - mLastRxTime > 5000)
+            return 0;
+        int cadPointer = mCadPointer;
+        int maxRot = mCadRotations[cadPointer % 600];
+        int minRot = maxRot;
+        long timeDuration = 0;
+        while(timeDuration < 60000) {
+            cadPointer--;
+            if(cadPointer < 0) cadPointer += 600;
+            long tryTime = mCadTimes[cadPointer % 600];
+            if(tryTime == 0 || t - tryTime > 61000) break;
+            timeDuration = t - tryTime;
+            minRot = mCadRotations[cadPointer % 600];
+            if(maxRot < minRot) maxRot += 0x1000000;
+            if(timeDuration > 15000 && maxRot - minRot > 20) break;
+        }
+        if(timeDuration == 0) mLastCalcCad = 0;
+        else mLastCalcCad = (int)((60000.0 / timeDuration) * (maxRot - minRot) + 0.5);
+        mLastCalcCadTime = t;
+        return mLastCalcCad;
+    }
+
     private void broadcastUpdate(final String action,
                                  final BluetoothGattCharacteristic characteristic) {
         final Intent intent = new Intent(action);
@@ -175,6 +214,7 @@ public class BluetoothLeService extends Service {
             if (data != null && data.length > 0) {
                 if(data.length == 17 && data[0] == 17 && data[1] == 32 && data[2] == 0) {
                     mLastRxTime = System.currentTimeMillis();
+                    updateCadence((data[4] & 0xFF) | ((data[5] & 0xFF) << 8) | ((data[6] & 0xFF) << 16));
                     long calories = (data[10] & 0xFF) | ((data[11] & 0xFF) << 8) | ((data[12] & 0xFF) << 16) | ((data[13] & 0xFF) << 24) | ((long)(data[14] & 0xFF) << 32) | ((long)(data[15] & 0xFF) << 40);
                     int tim = (data[8] & 0xFF) | ((data[9] & 0xFF) << 8);
                     if(mLastCalories == 0 || tim == mLastTime) {
@@ -186,12 +226,12 @@ public class BluetoothLeService extends Service {
                         int dtime = tim - mLastTime;
                         mLastTime = tim;
                         if(dtime < 0) dtime += 65536;
-                        double power = (double)dcalories / (double)dtime / 1.5;
+                        double power = (double)dcalories / (double)dtime / 1.5; //1.5: magic const
                         if(mLastPower == -1.0 || Math.abs(mLastPower - power) < 100.0)
                             mLastPower = power;
                         else
                             mLastPower += (power - mLastPower) / 2.0;
-                        intent.putExtra(EXTRA_DATA, String.valueOf((int)mLastPower) + String.format(" %ds", tim/1024) + String.format(" %dc", calories/256));
+                        intent.putExtra(EXTRA_DATA, String.valueOf((int)mLastPower) + String.format(" %ds", tim/1024) + String.format(" %dc %d rpm", calories/256, currentCadence()));
                         openPowerChannel();
                     }
                 } else {

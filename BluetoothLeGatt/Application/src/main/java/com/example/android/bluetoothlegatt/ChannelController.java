@@ -226,7 +226,7 @@ public class ChannelController {
                 BluetoothLeService.serv.page10[0] = 16;
                 BluetoothLeService.serv.page10[1] = (byte) BluetoothLeService.serv.cnt;
                 BluetoothLeService.serv.page10[2] = -1;
-                BluetoothLeService.serv.page10[3] = -1;
+                BluetoothLeService.serv.page10[3] = (byte) BluetoothLeService.serv.currentCadence();
                 BluetoothLeService.serv.page10[4] = (byte) BluetoothLeService.serv.acc_power;
                 BluetoothLeService.serv.page10[5] = (byte) (BluetoothLeService.serv.acc_power >> 8);
                 BluetoothLeService.serv.page10[6] = (byte) power;
