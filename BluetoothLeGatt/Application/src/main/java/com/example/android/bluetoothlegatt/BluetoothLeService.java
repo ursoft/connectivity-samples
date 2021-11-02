@@ -28,6 +28,7 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Binder;
 import android.os.IBinder;
 import android.util.Log;
@@ -226,7 +227,10 @@ public class BluetoothLeService extends Service {
                         int dtime = tim - mLastTime;
                         mLastTime = tim;
                         if(dtime < 0) dtime += 65536;
-                        double power = (double)dcalories / (double)dtime / 1.5; //1.5: magic const
+
+                        SharedPreferences prefs = getApplicationContext().getSharedPreferences("prefs", Context.MODE_PRIVATE);
+                        double mult = prefs.getInt("Cal2WattMult", 66) / 100.0;
+                        double power = (double)dcalories / (double)dtime * mult;
                         if(mLastPower == -1.0 || Math.abs(mLastPower - power) < 100.0)
                             mLastPower = power;
                         else

@@ -25,6 +25,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.util.Log;
@@ -32,6 +33,7 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.widget.ExpandableListView;
+import android.widget.SeekBar;
 import android.widget.SimpleExpandableListAdapter;
 import android.widget.TextView;
 
@@ -52,6 +54,7 @@ public class DeviceControlActivity extends Activity {
     public static final String EXTRAS_DEVICE_NAME = "DEVICE_NAME";
     public static final String EXTRAS_DEVICE_ADDRESS = "DEVICE_ADDRESS";
 
+    private SeekBar mSeekBarCal2WattMult;
     private TextView mConnectionState;
     private TextView mDataField;
     private String mDeviceName;
@@ -168,11 +171,44 @@ public class DeviceControlActivity extends Activity {
         mGattServicesList.setOnChildClickListener(servicesListClickListner);
         mConnectionState = (TextView) findViewById(R.id.connection_state);
         mDataField = (TextView) findViewById(R.id.data_value);
+        mSeekBarCal2WattMult = (SeekBar) findViewById(R.id.seekBarCal2WattMult);
 
         getActionBar().setTitle(mDeviceName);
         getActionBar().setDisplayHomeAsUpEnabled(true);
         Intent gattServiceIntent = new Intent(this, BluetoothLeService.class);
         bindService(gattServiceIntent, mServiceConnection, BIND_AUTO_CREATE);
+
+        mSeekBarCal2WattMult.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            SharedPreferences mPrefs = getApplicationContext().getSharedPreferences("prefs", Context.MODE_PRIVATE);
+            int mCal2WattMult = init();
+
+            private int init() {
+                int ret = mPrefs.getInt("Cal2WattMult", 66);
+                DeviceControlActivity.this.mSeekBarCal2WattMult.setProgress(ret);
+                return ret;
+            }
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                mCal2WattMult = progress;
+                mDataField.setText(String.format("C2W = 0.%02d", mCal2WattMult));
+            }
+
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                displayCoeff(Toast.LENGTH_SHORT);
+            }
+
+            private void displayCoeff(int length) {
+                Toast.makeText(DeviceControlActivity.this, "Calories 2 power coefficient: 0." + String.format("%02d", mCal2WattMult),
+                        length).show();
+            }
+
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                displayCoeff(Toast.LENGTH_LONG);
+                SharedPreferences.Editor editor = mPrefs.edit();
+                editor.putInt("Cal2WattMult", mCal2WattMult);
+                editor.commit();
+            }
+        });
+
     }
 
     @Override
