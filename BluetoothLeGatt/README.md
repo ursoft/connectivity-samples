@@ -1,4 +1,4 @@
-﻿Трансформер протокола Schwinn 570u (изделие с BTLE-адресом 84:71:27:27:4A:44 настроено соединять автоматом) в PowerMeter ANT+ (40000) и Cadence Sensor ANT+ (40001) - в таком виде его уже понимает ZWift.
+﻿Трансформер протокола Schwinn 570u (изделие с BTLE-адресом 84:71:27:27:4A:44 настроено соединять автоматом) в PowerMeter ANT+ (40000) и Cadence Sensor ANT+ (40001) - в таком виде его уже понимает ZWift. Аналог этой программы для Windows (реализован только протокол BLE) - https://github.com/ursoft/Jenx.Bluetooth.GattServer
 
 Выжимки протокола Schwinn 570u
 
