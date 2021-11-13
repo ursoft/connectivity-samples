@@ -24,16 +24,25 @@ import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothGattServer;
+import android.bluetooth.BluetoothGattServerCallback;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.bluetooth.le.AdvertiseCallback;
+import android.bluetooth.le.AdvertiseData;
+import android.bluetooth.le.AdvertiseSettings;
+import android.bluetooth.le.BluetoothLeAdvertiser;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Binder;
 import android.os.IBinder;
 import android.util.Log;
+import android.os.ParcelUuid;
 
 import java.util.List;
+import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.UUID;
 
 import android.widget.Toast;
@@ -189,6 +198,15 @@ public class BluetoothLeService extends Service {
         return mLastCalcCad;
     }
 
+        //коэффициент нелинейности нагрузки 1-25 Schwinn
+    double[] extra_mult = { 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, 0.60, //1-10
+        0.60, 0.60, 0.60, //11-13
+        0.75, 0.91, 1.07, //14-16
+        1.23, 1.39, 1.55, //17-19
+        1.72, 1.88, 2.04, //20-22
+        2.20, 2.36, 2.52  //23-25
+    };
+    private byte[] lastSchwinnData;
     private void broadcastUpdate(final String action,
                                  final BluetoothGattCharacteristic characteristic) {
         final Intent intent = new Intent(action);
@@ -214,6 +232,7 @@ public class BluetoothLeService extends Service {
             final byte[] data = characteristic.getValue();
             if (data != null && data.length > 0) {
                 if(data.length == 17 && data[0] == 17 && data[1] == 32 && data[2] == 0) {
+                    lastSchwinnData = data.clone();
                     mLastRxTime = System.currentTimeMillis();
                     updateCadence((data[4] & 0xFF) | ((data[5] & 0xFF) << 8) | ((data[6] & 0xFF) << 16));
                     long calories = (data[10] & 0xFF) | ((data[11] & 0xFF) << 8) | ((data[12] & 0xFF) << 16) | ((data[13] & 0xFF) << 24) | ((long)(data[14] & 0xFF) << 32) | ((long)(data[15] & 0xFF) << 40);
@@ -229,14 +248,19 @@ public class BluetoothLeService extends Service {
                         if(dtime < 0) dtime += 65536;
 
                         SharedPreferences prefs = getApplicationContext().getSharedPreferences("prefs", Context.MODE_PRIVATE);
-                        double mult = prefs.getInt("Cal2WattMult", 66) / 100.0;
+                        int em_idx = (int)data[16] - 1;
+                        if (em_idx < 0) em_idx = 0;
+                        if (em_idx > 24) em_idx = 24;
+                        double mult = prefs.getInt("Cal2WattMult", 42) / 100.0 * extra_mult[em_idx];
                         double power = (double)dcalories / (double)dtime * mult;
                         if(mLastPower == -1.0 || Math.abs(mLastPower - power) < 100.0)
                             mLastPower = power;
                         else
                             mLastPower += (power - mLastPower) / 2.0;
+                        if(mLastPower < 0) mLastPower = 1.0;
                         intent.putExtra(EXTRA_DATA, String.valueOf((int)mLastPower) + String.format(" %ds", tim/1024) + String.format(" %dc %d rpm", calories/256, currentCadence()));
                         openPowerChannel();
+                        notifyConnectedBleClients();
                     }
                 } else {
                     final StringBuilder stringBuilder = new StringBuilder(data.length);
@@ -317,6 +341,9 @@ public class BluetoothLeService extends Service {
         }
     };
     private final IBinder mBinder = new LocalBinder();
+    private BluetoothLeAdvertiser mBluetoothLeAdvertiser;
+    private BluetoothGattServer mGattServer;
+    private ArrayList<BluetoothDevice> mConnectedBleClients;
 
     /**
      * Initializes a reference to the local Bluetooth adapter.
@@ -342,8 +369,259 @@ public class BluetoothLeService extends Service {
         }
 
         AntService.bindService(this, this.mAntRadioServiceConnection);
+
+        initBleServer();
         return true;
     }
+
+    private static UUID BLE_SERVICE_UUID_CYCLING_POWER = UUID.fromString("00001818-0000-1000-8000-00805f9b34fb");
+    private static UUID CHARACTERISTIC_POWER_MEASUREMENT = UUID.fromString("00002a63-0000-1000-8000-00805f9b34fb");
+    private static UUID CHARACTERISTIC_POWER_FEATURE = UUID.fromString("00002a65-0000-1000-8000-00805f9b34fb");
+    private static UUID CHARACTERISTIC_SENSOR_LOCATION = UUID.fromString("00002a5d-0000-1000-8000-00805f9b34fb");
+
+    private static UUID BLE_SERVICE_UUID_CYCLING_SPD_CAD = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb");
+    private static UUID CHARACTERISTIC_CSC_MEASUREMENT = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb");
+    private static UUID CHARACTERISTIC_CSC_FEATURE = UUID.fromString("00002a5c-0000-1000-8000-00805f9b34fb");
+
+    private static UUID CLIENT_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB");
+
+    private void postStatusMessage(final String msg) {
+        final Intent intent = new Intent(ACTION_DATA_AVAILABLE);
+        intent.putExtra(EXTRA_DATA, msg);
+        sendBroadcast(intent);
+    }
+
+    private void initBleServer() {
+        mBluetoothLeAdvertiser = mBluetoothAdapter.getBluetoothLeAdvertiser();
+        mGattServer = mBluetoothManager.openGattServer(this, mGattServerCallback);
+        mConnectedBleClients = new ArrayList<BluetoothDevice>();
+
+        BluetoothGattService service = new BluetoothGattService(BLE_SERVICE_UUID_CYCLING_POWER,
+                BluetoothGattService.SERVICE_TYPE_PRIMARY);
+        BluetoothGattCharacteristic pf = new BluetoothGattCharacteristic(CHARACTERISTIC_POWER_FEATURE,
+                BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ);
+        BluetoothGattCharacteristic sl = new BluetoothGattCharacteristic(CHARACTERISTIC_SENSOR_LOCATION,
+                BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ);
+
+        BluetoothGattCharacteristic pm = new BluetoothGattCharacteristic(CHARACTERISTIC_POWER_MEASUREMENT,
+                BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_READ);
+        BluetoothGattDescriptor gd = new BluetoothGattDescriptor(CLIENT_CONFIG, BluetoothGattDescriptor.PERMISSION_WRITE | BluetoothGattDescriptor.PERMISSION_READ);
+        pm.addDescriptor(gd);
+        service.addCharacteristic(pm);
+        service.addCharacteristic(pf);
+        service.addCharacteristic(sl);
+
+        mGattServer.addService(service);
+    }
+    private void shutdownBleServer() {
+        //mHandler.removeCallbacks(mNotifyRunnable);
+        if (mGattServer == null) return;
+        mGattServer.close();
+    }
+
+    /* Storage and access to local characteristic data */
+    private byte mLastCadLowByte = 0;
+    private void notifyConnectedBleClients() {
+        for (BluetoothDevice device : mConnectedBleClients) {
+            BluetoothGattCharacteristic ch = mGattServer.getService(BLE_SERVICE_UUID_CYCLING_POWER)
+                    .getCharacteristic(CHARACTERISTIC_POWER_MEASUREMENT);
+            int power = (int)mLastPower;
+            ch.setValue(new byte[] {0, 0, (byte)(power & 0xFF), (byte)((power >> 8) & 0xFF)});
+            mGattServer.notifyCharacteristicChanged(device, ch, false);
+            
+            if(lastSchwinnData == null) return;
+
+            byte cadLowByte = lastSchwinnData[4];
+            if(mLastCadLowByte != cadLowByte) {
+                mLastCadLowByte = cadLowByte;
+                ch = mGattServer.getService(BLE_SERVICE_UUID_CYCLING_SPD_CAD)
+                        .getCharacteristic(CHARACTERISTIC_CSC_MEASUREMENT);
+                ch.setValue(new byte[] {2,                  // flags
+                    lastSchwinnData[4], lastSchwinnData[5], //crank rev#
+                    lastSchwinnData[8], lastSchwinnData[9]  //time
+                });
+                mGattServer.notifyCharacteristicChanged(device, ch, false);
+            }
+        }
+    }
+    /*
+     * Callback handles all incoming requests from GATT clients.
+     * From connections to read/write requests.
+     */
+    private BluetoothGattServerCallback mGattServerCallback = new BluetoothGattServerCallback() {
+        @Override
+        public void onConnectionStateChange(BluetoothDevice device, int status, int newState) {
+            super.onConnectionStateChange(device, status, newState);
+            //Log.i(TAG, "onConnectionStateChange "
+            //        +DeviceProfile.getStatusDescription(status)+" "
+            //        +DeviceProfile.getStateDescription(newState));
+
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                mConnectedBleClients.remove(device);
+            }
+        }
+
+        @Override
+        public void onServiceAdded(int status, BluetoothGattService service) {
+            super.onServiceAdded(status, service);
+            if(BLE_SERVICE_UUID_CYCLING_POWER.equals(service.getUuid())) {
+                service = new BluetoothGattService(BLE_SERVICE_UUID_CYCLING_SPD_CAD,
+                    BluetoothGattService.SERVICE_TYPE_PRIMARY);
+                BluetoothGattCharacteristic cf = new BluetoothGattCharacteristic(CHARACTERISTIC_CSC_FEATURE,
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+                    BluetoothGattCharacteristic.PERMISSION_READ);
+                BluetoothGattCharacteristic cm = new BluetoothGattCharacteristic(CHARACTERISTIC_CSC_MEASUREMENT,
+                    BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                    BluetoothGattCharacteristic.PERMISSION_READ);
+                cm.addDescriptor(new BluetoothGattDescriptor(CLIENT_CONFIG, BluetoothGattDescriptor.PERMISSION_WRITE | BluetoothGattDescriptor.PERMISSION_READ));
+                service.addCharacteristic(cm);
+                service.addCharacteristic(cf);
+                service.addCharacteristic(new BluetoothGattCharacteristic(CHARACTERISTIC_SENSOR_LOCATION,
+                    BluetoothGattCharacteristic.PROPERTY_READ,
+                    BluetoothGattCharacteristic.PERMISSION_READ));
+
+                mGattServer.addService(service);
+            } else
+                startBleAdvertising();
+        }
+
+        @Override
+        public void onDescriptorReadRequest(BluetoothDevice device, int requestId, int offset, BluetoothGattDescriptor descriptor) {
+            if (CLIENT_CONFIG.equals(descriptor.getUuid())) {
+                Log.d(TAG, "Config descriptor read");
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        offset,
+                        mConnectedBleClients.contains(device) ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE : BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
+            } else {
+                Log.w(TAG, "Unknown descriptor read request");
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        offset,
+                        null);
+            }
+        }
+
+        @Override
+        public void onDescriptorWriteRequest(BluetoothDevice device, int requestId, BluetoothGattDescriptor descriptor, boolean preparedWrite, boolean responseNeeded, int offset, byte[] value) {
+            if (CLIENT_CONFIG.equals(descriptor.getUuid())) {
+                if (Arrays.equals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE, value)) {
+                    //Log.d(TAG, "Subscribe device to notifications: $device")
+                    mConnectedBleClients.add(device);
+                } else if (Arrays.equals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE, value)) {
+                    //Log.d(TAG, "Unsubscribe device from notifications: $device")
+                    mConnectedBleClients.remove(device);
+                }
+                if (responseNeeded) {
+                    mGattServer.sendResponse(device,
+                            requestId,
+                            BluetoothGatt.GATT_SUCCESS,
+                            0,
+                            null);
+                }
+            } else {
+                Log.w(TAG, "Unknown descriptor write request");
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        offset,
+                        null);
+            }
+        }
+
+        @Override
+        public void onCharacteristicReadRequest(BluetoothDevice device,
+                                                int requestId,
+                                                int offset,
+                                                BluetoothGattCharacteristic characteristic) {
+            super.onCharacteristicReadRequest(device, requestId, offset, characteristic);
+            Log.i(TAG, "onCharacteristicReadRequest " + characteristic.getUuid().toString());
+
+            if (CHARACTERISTIC_POWER_FEATURE.equals(characteristic.getUuid())) {
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        new byte[] {0, 0, 1, 0});
+            } else if (CHARACTERISTIC_CSC_FEATURE.equals(characteristic.getUuid())) {
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        new byte[] {2, 0});
+            } else if (CHARACTERISTIC_SENSOR_LOCATION.equals(characteristic.getUuid())) {
+                mGattServer.sendResponse(device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        new byte[] { 12 /* rear wheel */});
+            }
+
+            /*
+             * Unless the characteristic supports WRITE_NO_RESPONSE,
+             * always send a response back for any request.
+             */
+            /*mGattServer.sendResponse(device,
+                    requestId,
+                    BluetoothGatt.GATT_FAILURE,
+                    0,
+                    null);*/
+        }
+    };
+
+    /*
+     * Initialize the advertiser
+     */
+    private void startBleAdvertising() {
+        if (mBluetoothLeAdvertiser == null) return;
+
+        AdvertiseSettings settings = new AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+                .setConnectable(true)
+                .setTimeout(0)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .build();
+
+        AdvertiseData adata = new AdvertiseData.Builder()
+                .setIncludeDeviceName(true)
+                .addServiceUuid(new ParcelUuid(BLE_SERVICE_UUID_CYCLING_POWER))
+                .addServiceUuid(new ParcelUuid(BLE_SERVICE_UUID_CYCLING_SPD_CAD))
+                .build();
+
+        mBluetoothLeAdvertiser.startAdvertising(settings, adata, mAdvertiseCallback);
+    }
+
+    /*
+     * Terminate the advertiser
+     */
+    private void stopBleAdvertising() {
+        if (mBluetoothLeAdvertiser == null) return;
+
+        mBluetoothLeAdvertiser.stopAdvertising(mAdvertiseCallback);
+    }
+
+    /*
+     * Callback handles events from the framework describing
+     * if we were successful in starting the advertisement requests.
+     */
+    private AdvertiseCallback mAdvertiseCallback = new AdvertiseCallback() {
+        @Override
+        public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+            Log.i(TAG, "Peripheral Advertise Started.");
+            postStatusMessage("GATT Server Ready");
+        }
+
+        @Override
+        public void onStartFailure(int errorCode) {
+            Log.w(TAG, "Peripheral Advertise Failed: "+errorCode);
+            postStatusMessage("GATT Server Error "+errorCode);
+        }
+    };
 
     /**
      * Connects to the GATT server hosted on the Bluetooth LE device.
@@ -411,6 +689,8 @@ public class BluetoothLeService extends Service {
         }
         mBluetoothGatt.close();
         mBluetoothGatt = null;
+        stopBleAdvertising();
+        shutdownBleServer();
     }
 
     /**
